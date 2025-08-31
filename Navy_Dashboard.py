@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 import os
 from pymongo import MongoClient
 import csv
+import io
 
 load_dotenv()
 
@@ -15,18 +16,14 @@ st.set_page_config(page_title="NAVY_DashBoard",page_icon="🚀")
 col1, col2 = st.columns(2)
 with col1:
     start_date = st.date_input("Start Date", "2025-08-28")
-    print(start_date)
 with col2:
     start_time = st.time_input("Start Time", "2025-08-28")
-    print(start_time)
 
 col3, col4 = st.columns(2)
 with col3:
     end_date = st.date_input("End Date", date.today())
-    print(end_date)
 with col4:
     end_time = st.time_input("End Time", datetime.today())
-    print(end_time)
 
 
 # --- Buttons ---
@@ -62,17 +59,26 @@ if check_btn or fetch_btn:
                 print(query)
                 documents = list(collection.find(query))
                 if documents:
+                    for doc in documents:
+                        doc['_id'] = str(doc['_id'])
+                    
                     headers = list(documents[0].keys())
+                    
+                    buffer = io.StringIO()
+                    writer = csv.DictWriter(buffer, fieldnames=headers)
+                    writer.writeheader()
+                    writer.writerows(documents)
+
+                    csv_data= buffer.getvalue().encode("utf-8")
 
                     filename = f"navy_data_Check_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
-                    with open(filename, 'w', newline='', encoding='utf-8') as f:
-                        writer = csv.DictWriter(f, fieldnames=headers)
-                        writer.writeheader()
-                        for doc in documents:
-                            doc['_id'] = str(doc['_id'])
-                            writer.writerow(doc)
-
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv_data,
+                        file_name=filename,
+                        mime="text/csv"
+                    )
                     st.success("✅ Data saved")
                 else:
                     st.warning("⚠️ No data found in the specified date range.")
