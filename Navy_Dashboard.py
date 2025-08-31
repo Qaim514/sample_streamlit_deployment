@@ -89,16 +89,27 @@ if check_btn or fetch_btn:
                 }
                 documents = list(collection.find(query))
                 if documents:
+                    for doc in documents:
+                            doc['_id'] = str(doc['_id'])
+
                     headers = list(documents[0].keys())
+
+                    buffer = io.StringIO()
+                    writer = csv.DictWriter(buffer, fieldnames=headers)
+                    writer.writeheader()
+                    writer.writerows(documents)
+
+                    csv_data= buffer.getvalue().encode("utf-8")
 
                     filename = f"navy_data_Fetch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
-                    with open(filename, 'w', newline='', encoding='utf-8') as f:
-                        writer = csv.DictWriter(f, fieldnames=headers)
-                        writer.writeheader()
-                        for doc in documents:
-                            doc['_id'] = str(doc['_id'])
-                            writer.writerow(doc)
+                    
+                    st.download_button(
+                        label="Download CSV",
+                        data=csv_data,
+                        file_name=filename,
+                        mime="text/csv"
+                    )
 
                     st.success("✅ Data saved")
                 else:
