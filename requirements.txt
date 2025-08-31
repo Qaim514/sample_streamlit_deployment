@@ -1,0 +1,6 @@
+streamlit==1.49.1
+pymongo
+python-dotenv
+datetime
+os
+csv
