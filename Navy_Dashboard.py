@@ -8,16 +8,15 @@ import io
 
 load_dotenv()
 
+st.set_page_config(page_title="NAVY_DashBoard", page_icon="🚀")
 st.title("Date Range Filter")
 
-st.set_page_config(page_title="NAVY_DashBoard",page_icon="🚀")
-
-
+# --- Inputs ---
 col1, col2 = st.columns(2)
 with col1:
-    start_date = st.date_input("Start Date", "2025-08-28")
+    start_date = st.date_input("Start Date", date.today())
 with col2:
-    start_time = st.time_input("Start Time", "2025-08-28")
+    start_time = st.time_input("Start Time", datetime.today())
 
 col3, col4 = st.columns(2)
 with col3:
@@ -25,18 +24,15 @@ with col3:
 with col4:
     end_time = st.time_input("End Time", datetime.today())
 
-
-# --- Buttons ---
-col5, col6 = st.columns([5,5])
+col5, col6 = st.columns([5, 5])
 with col5:
-    check_btn = st.button("Check Data",use_container_width=True)
+    check_btn = st.button("Check Data", use_container_width=True)
 with col6:
-    fetch_btn = st.button("Fetch Data",use_container_width=True)
+    fetch_btn = st.button("Fetch Data", use_container_width=True)
 
-st.write("Selected range:",start_date, "→", end_date)
+st.write("Selected range:", start_date, "→", end_date)
 
-
-
+# --- Processing ---
 if check_btn or fetch_btn:
     if end_date < start_date:
         st.error("❌ End Date must be greater than or equal to Start Date.")
@@ -45,82 +41,52 @@ if check_btn or fetch_btn:
         end_datetime = datetime.combine(end_date, end_time)
         if start_datetime >= end_datetime:
             st.error("❌ End Date-Time must be greater than Start Date-Time.")
-        else:            
-            Mongo_uri=os.getenv("MONGO_URL")
+        else:
+            Mongo_uri = os.getenv("MONGO_URL")
             client = MongoClient(Mongo_uri)
             db = client['iotdb']
             collection = db['navy']
 
+            # --- Query ---
+            query = {
+                "timestamp": {"$gte": start_datetime.isoformat(), "$lte": end_datetime.isoformat()}
+            }
             if check_btn:
-                query={
-                    "timestamp": {"$gte": start_datetime.isoformat(),"$lte": end_datetime.isoformat()},
-                     "Genset_Run_SS": {"$gte": 0, "$lte": 2}
-                }
-                print(query)
-                documents = list(collection.find(query))
-                if documents:
-                    for doc in documents:
-                        doc['_id'] = str(doc['_id'])
-                    
-                    headers = list(documents[0].keys())
-                    
-                    buffer = io.StringIO()
+                query["Genset_Run_SS"] = {"$gte": 0, "$lte": 2}
+
+            # --- Stream CSV writing ---
+            buffer = io.StringIO()
+            first_row = None
+
+            cursor = collection.find(query, no_cursor_timeout=True).batch_size(5000)
+
+            writer = None
+            count = 0
+            for doc in cursor:
+                doc["_id"] = str(doc["_id"])  # convert ObjectId
+                if first_row is None:
+                    headers = list(doc.keys())
                     writer = csv.DictWriter(buffer, fieldnames=headers)
                     writer.writeheader()
-                    writer.writerows(documents)
+                    first_row = True
+                writer.writerow(doc)
+                count += 1
 
-                    csv_data= buffer.getvalue().encode("utf-8")
+            cursor.close()
 
-                    filename = f"navy_data_Check_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            if count > 0:
+                csv_data = buffer.getvalue().encode("utf-8")
+                filename = f"navy_data_{'Check' if check_btn else 'Fetch'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
-                    st.download_button(
-                        label="Download CSV",
-                        data=csv_data,
-                        file_name=filename,
-                        mime="text/csv"
-                    )
-                    st.success("✅ Data saved")
-                else:
-                    st.warning("⚠️ No data found in the specified date range.")
-
-            if fetch_btn:
-                query={
-                    "timestamp": {"$gte": start_datetime.isoformat(),"$lte": end_datetime.isoformat()},
-                }
-                documents = list(collection.find(query))
-                if documents:
-                    for doc in documents:
-                            doc['_id'] = str(doc['_id'])
-
-                    headers = list(documents[0].keys())
-
-                    buffer = io.StringIO()
-                    writer = csv.DictWriter(buffer, fieldnames=headers)
-                    writer.writeheader()
-                    writer.writerows(documents)
-
-                    csv_data= buffer.getvalue().encode("utf-8")
-
-                    filename = f"navy_data_Fetch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
-                    
-                    st.download_button(
-                        label="Download CSV",
-                        data=csv_data,
-                        file_name=filename,
-                        mime="text/csv"
-                    )
-
-                    st.success("✅ Data saved")
-                else:
-                    st.warning("⚠️ No data found in the specified date range.")
-
-            
-
-            
-
-            
-
+                st.download_button(
+                    label="Download CSV",
+                    data=csv_data,
+                    file_name=filename,
+                    mime="text/csv"
+                )
+                st.success(f"✅ {count} records saved")
+            else:
+                st.warning("⚠️ No data found in the specified date range.")
 
 
 
