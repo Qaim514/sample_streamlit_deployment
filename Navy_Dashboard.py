@@ -5,11 +5,110 @@ import os
 from pymongo import MongoClient
 import csv
 import io
+import pandas as pd
+from typing import Dict, Any, Optional
 
 load_dotenv()
 
+# Initialize MongoDB connection with optimizations
+@st.cache_resource
+def get_mongo_client():
+    """Cache MongoDB client to avoid reconnection overhead"""
+    mongo_uri = os.getenv("MONGO_URL")
+    # Add connection pooling and timeout optimizations
+    client = MongoClient(
+        mongo_uri,
+        maxPoolSize=50,  # Increase connection pool
+        serverSelectionTimeoutMS=5000,  # 5 second timeout
+        socketTimeoutMS=30000,  # 30 second socket timeout
+        connectTimeoutMS=5000,  # 5 second connection timeout
+        maxIdleTimeMS=45000,  # Keep connections alive longer
+        waitQueueTimeoutMS=5000
+    )
+    return client
+
+def build_optimized_query(start_datetime: datetime, end_datetime: datetime, is_check: bool) -> Dict[str, Any]:
+    """Build optimized MongoDB query with proper indexing hints"""
+    query = {
+        "timestamp": {
+            "$gte": start_datetime.isoformat(), 
+            "$lte": end_datetime.isoformat()
+        }
+    }
+    
+    if is_check:
+        # Combine filters for better index utilization
+        query["Genset_Run_SS"] = {"$gte": 0, "$lte": 2}
+    
+    return query
+
+def get_projection_fields() -> Optional[Dict[str, int]]:
+    """Define projection to reduce data transfer - customize based on your needs"""
+    # Return None to fetch all fields, or specify fields to reduce network transfer
+    # Example: return {"timestamp": 1, "Genset_Run_SS": 1, "field1": 1, "field2": 1}
+    return None
+
+def stream_data_to_csv(collection, query: Dict[str, Any], projection: Optional[Dict[str, int]] = None) -> tuple[str, int]:
+    """Optimized streaming data extraction with better memory management"""
+    buffer = io.StringIO()
+    writer = None
+    count = 0
+    headers_written = False
+    
+    try:
+        # Optimized cursor with larger batch size and projection
+        cursor = collection.find(
+            query, 
+            projection,
+            no_cursor_timeout=True
+        ).batch_size(10000)  # Increased batch size
+        
+        # Hint to use timestamp index (adjust index name as needed)
+        cursor.hint([("timestamp", 1)])
+        
+        # Process in chunks for better memory management
+        batch = []
+        batch_size = 1000
+        
+        for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            
+            if not headers_written:
+                headers = list(doc.keys())
+                writer = csv.DictWriter(buffer, fieldnames=headers)
+                writer.writeheader()
+                headers_written = True
+            
+            batch.append(doc)
+            count += 1
+            
+            # Write batch when it reaches batch_size
+            if len(batch) >= batch_size:
+                writer.writerows(batch)
+                batch.clear()
+        
+        # Write remaining batch
+        if batch and writer:
+            writer.writerows(batch)
+        
+        cursor.close()
+        
+    except Exception as e:
+        st.error(f"Database error: {str(e)}")
+        return "", 0
+    
+    return buffer.getvalue(), count
+
+# --- Streamlit UI ---
 st.set_page_config(page_title="NAVY_DashBoard", page_icon="🚀")
 st.title("Date Range Filter")
+
+# Add performance mode selection
+performance_mode = st.selectbox(
+    "Performance Mode",
+    ["Standard (Streaming)"],
+    help="Standard: Better for very large datasets. Fast: Better for medium datasets. Auto: Automatically choose based on estimated size."
+)
 
 # --- Inputs ---
 col1, col2 = st.columns(2)
@@ -39,55 +138,43 @@ if check_btn or fetch_btn:
     else:
         start_datetime = datetime.combine(start_date, start_time)
         end_datetime = datetime.combine(end_date, end_time)
+        
         if start_datetime >= end_datetime:
             st.error("❌ End Date-Time must be greater than Start Date-Time.")
         else:
-            Mongo_uri = os.getenv("MONGO_URL")
-            client = MongoClient(Mongo_uri)
-            db = client['iotdb']
-            collection = db['navy']
-
-            # --- Query ---
-            query = {
-                "timestamp": {"$gte": start_datetime.isoformat(), "$lte": end_datetime.isoformat()}
-            }
-            if check_btn:
-                query["Genset_Run_SS"] = {"$gte": 0, "$lte": 2}
-
-            # --- Stream CSV writing ---
-            buffer = io.StringIO()
-            first_row = None
-
-            cursor = collection.find(query, no_cursor_timeout=True).batch_size(5000)
-
-            writer = None
-            count = 0
-            for doc in cursor:
-                doc["_id"] = str(doc["_id"])  # convert ObjectId
-                if first_row is None:
-                    headers = list(doc.keys())
-                    writer = csv.DictWriter(buffer, fieldnames=headers)
-                    writer.writeheader()
-                    first_row = True
-                writer.writerow(doc)
-                count += 1
-
-            cursor.close()
-
+            # Show progress
+            with st.spinner('Connecting to database...'):
+                client = get_mongo_client()
+                db = client['iotdb']
+                collection = db['navy']
+            
+            # Build optimized query
+            query = build_optimized_query(start_datetime, end_datetime, check_btn)
+            projection = get_projection_fields()
+            
+            # Estimate data size for auto mode
+            if performance_mode == "Auto":
+                with st.spinner('Estimating data size...'):
+                    estimated_count = collection.count_documents(query)
+                    use_pandas = estimated_count < 50000  # Use pandas for smaller datasets
+            else:
+                use_pandas = performance_mode == "Fast (Pandas)"
+            
+            # Process data
+            with st.spinner(f'Processing data using {"Streaming"} mode...'):
+                csv_data, count = stream_data_to_csv(collection, query, projection)
+            
             if count > 0:
-                csv_data = buffer.getvalue().encode("utf-8")
-                filename = f"navy_data_{'Check' if check_btn else 'Fetch'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                csv_bytes = csv_data.encode("utf-8")
+                filename = f"navy_data_{'Check' if check_btn else 'Fetch'}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
 
                 st.download_button(
-                    label="Download CSV",
-                    data=csv_data,
+                    label=f"📥 Download CSV ({count:,} records)",
+                    data=csv_bytes,
                     file_name=filename,
                     mime="text/csv"
                 )
-                st.success(f"✅ {count} records saved")
+                st.success(f"✅ {count:,} records processed successfully")
+                    
             else:
                 st.warning("⚠️ No data found in the specified date range.")
-
-
-
-
