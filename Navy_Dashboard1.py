@@ -1,180 +1,167 @@
 import streamlit as st
-from datetime import datetime, date, time
+from datetime import datetime, date, time,timedelta
 from dotenv import load_dotenv
 import os
 from pymongo import MongoClient
-import csv
-import io
 import pandas as pd
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 
 load_dotenv()
 
-# Initialize MongoDB connection with optimizations
+# --- MongoDB connection ---
 @st.cache_resource
 def get_mongo_client():
-    """Cache MongoDB client to avoid reconnection overhead"""
     mongo_uri = os.getenv("MONGO_URL")
-    # Add connection pooling and timeout optimizations
     client = MongoClient(
         mongo_uri,
-        maxPoolSize=50,  # Increase connection pool
-        serverSelectionTimeoutMS=5000,  # 5 second timeout
-        socketTimeoutMS=30000,  # 30 second socket timeout
-        connectTimeoutMS=5000,  # 5 second connection timeout
-        maxIdleTimeMS=45000,  # Keep connections alive longer
-        waitQueueTimeoutMS=5000
+        maxPoolSize=50,
+        serverSelectionTimeoutMS=3000,
+        readPreference='secondaryPreferred'
     )
     return client
 
-def build_optimized_query(start_datetime: datetime, end_datetime: datetime, is_check: bool) -> Dict[str, Any]:
-    """Build optimized MongoDB query with proper indexing hints"""
-    query = {
-        "timestamp": {
-            "$gte": start_datetime.isoformat(), 
-            "$lte": end_datetime.isoformat()
-        }
-    }
-    
-    if is_check:
-        # Combine filters for better index utilization
-        query["Genset_Run_SS"] = {"$gte": 0, "$lte": 2}
-    
-    return query
+def fetch_paginated_data(collection, query: Dict[str, Any], skip: int, limit: int):
+    cursor = collection.find(query).sort("timestamp", 1).skip(skip).limit(limit).hint([("timestamp", 1)])
+    docs = []
+    for doc in cursor:
+        doc["_id"] = str(doc["_id"])
+        docs.append(doc)
+    return docs
 
-def get_projection_fields() -> Optional[Dict[str, int]]:
-    """Define projection to reduce data transfer - customize based on your needs"""
-    # Return None to fetch all fields, or specify fields to reduce network transfer
-    # Example: return {"timestamp": 1, "Genset_Run_SS": 1, "field1": 1, "field2": 1}
-    return None
-
-def stream_data_to_csv(collection, query: Dict[str, Any], projection: Optional[Dict[str, int]] = None) -> tuple[str, int]:
-    """Optimized streaming data extraction with better memory management"""
-    buffer = io.StringIO()
-    writer = None
-    count = 0
-    headers_written = False
-    
-    try:
-        # Optimized cursor with larger batch size and projection
-        cursor = collection.find(
-            query, 
-            projection,
-            no_cursor_timeout=True
-        ).batch_size(10000)  # Increased batch size
-        
-        # Hint to use timestamp index (adjust index name as needed)
-        cursor.hint([("timestamp", 1)])
-        
-        # Process in chunks for better memory management
-        batch = []
-        batch_size = 1000
-        
-        for doc in cursor:
-            doc["_id"] = str(doc["_id"])
-            
-            if not headers_written:
-                headers = list(doc.keys())
-                writer = csv.DictWriter(buffer, fieldnames=headers)
-                writer.writeheader()
-                headers_written = True
-            
-            batch.append(doc)
-            count += 1
-            
-            # Write batch when it reaches batch_size
-            if len(batch) >= batch_size:
-                writer.writerows(batch)
-                batch.clear()
-        
-        # Write remaining batch
-        if batch and writer:
-            writer.writerows(batch)
-        
-        cursor.close()
-        
-    except Exception as e:
-        st.error(f"Database error: {str(e)}")
-        return "", 0
-    
-    return buffer.getvalue(), count
+def get_total_count(collection, query: Dict[str, Any]) -> int:
+    return collection.count_documents(query, maxTimeMS=10000)
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="NAVY_DashBoard", page_icon="🚀")
-st.title("Date Range Filter")
+st.set_page_config(page_title="Navy_Dashboard", page_icon="⚡", layout="wide")
+st.title("⚡ Navy Data Filter")
 
-# Add performance mode selection
-performance_mode = st.selectbox(
-    "Performance Mode",
-    ["Standard (Streaming)", "Auto"],
-    help="Standard: Better for very large datasets. Fast: Better for medium datasets. Auto: Automatically choose based on estimated size."
-)
+# Hide Streamlit UI
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}  
+    footer {visibility: hidden;}     
+    header {visibility: hidden;}     
+    a.anchor-link {display: none;}
+    </style>
+""", unsafe_allow_html=True)
 
-# --- Inputs ---
-col1, col2 = st.columns(2)
+# --- Session state ---
+if "current_page" not in st.session_state:
+    st.session_state.current_page = 0
+if "records_per_page" not in st.session_state:
+    st.session_state.records_per_page = 100
+if "total_records" not in st.session_state:
+    st.session_state.total_records = 0
+if "query" not in st.session_state:
+    st.session_state.query = None
+if "query_executed" not in st.session_state:
+    st.session_state.query_executed = False
+
+# --- Date inputs ---
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     start_date = st.date_input("Start Date", date.today())
 with col2:
-    start_time = st.time_input("Start Time", datetime.today())
-
-col3, col4 = st.columns(2)
+    start_time = st.time_input("Start Time", time(0, 0),step=timedelta(minutes=5))
 with col3:
-    end_date = st.date_input("End Date", date.today())
+    end_date = st.date_input("End Date", date.today())  
 with col4:
-    end_time = st.time_input("End Time", datetime.today())
+    end_time = st.time_input("End Time", time(23, 59),step=timedelta(minutes=5))
 
-col5, col6 = st.columns([5, 5])
-with col5:
-    check_btn = st.button("Check Data", use_container_width=True)
-with col6:
-    fetch_btn = st.button("Fetch Data", use_container_width=True)
+start_datetime = datetime.combine(start_date, start_time)
+end_datetime = datetime.combine(end_date, end_time)
 
-st.write("Selected range:", start_date, "→", end_date)
+if start_datetime >= end_datetime:
+    st.error("❌ End date-time must be greater than start date-time")
+    st.stop()
 
-# --- Processing ---
-if check_btn or fetch_btn:
-    if end_date < start_date:
-        st.error("❌ End Date must be greater than or equal to Start Date.")
-    else:
-        start_datetime = datetime.combine(start_date, start_time)
-        end_datetime = datetime.combine(end_date, end_time)
-        
-        if start_datetime >= end_datetime:
-            st.error("❌ End Date-Time must be greater than Start Date-Time.")
+# --- Buttons ---
+col_a, col_b = st.columns([5, 5])
+with col_b:
+    if st.button("📊 Fetch Data", width="stretch"):
+        st.session_state.query = {
+            "timestamp": {
+                "$gte": start_datetime.isoformat(),
+                "$lt": end_datetime.isoformat()
+            }
+        }
+        st.session_state.current_page = 0
+        st.session_state.query_executed = True
+        st.session_state.total_records = 0  # reset count
+        st.rerun()
+
+with col_a:
+    if st.button("🔍 Check Data", width="stretch"):
+        st.session_state.query = {
+            "timestamp": {
+                "$gte": start_datetime.isoformat(),
+                "$lt": end_datetime.isoformat()
+            },
+            "Genset_Run_SS": {"$gte": 1, "$lte": 6}
+        }
+        st.session_state.current_page = 0
+        st.session_state.query_executed = True
+        st.session_state.total_records = 0  # reset count
+        st.rerun()
+
+# --- Data processing ---
+if st.session_state.query_executed and st.session_state.query:
+    try:
+        client = get_mongo_client()
+        db = client["iotdb"]
+        collection = db["navy"]
+
+        # Count only once
+        if st.session_state.total_records == 0:
+            with st.spinner("Counting records..."):
+                st.session_state.total_records = get_total_count(collection, st.session_state.query)
+
+        total_records = st.session_state.total_records
+        if total_records == 0:
+            st.warning("⚠️ No data found in the specified date range")
+            st.stop()
+
+        # Pagination
+        total_pages = (total_records - 1) // 100 + 1
+        current_page = st.session_state.current_page
+
+        st.info(f"📊 Found {total_records:,} records | Page {current_page + 1} of {total_pages}")
+
+        col_prev,col_space, col_info,col_space2, col_next = st.columns([1,2, 4, 2,1])
+        with col_prev:
+            if st.button("◀ Previous", disabled=(current_page == 0)):
+                st.session_state.current_page = max(0, current_page - 1)
+                st.rerun()
+        with col_info:
+            # Jump to page
+            target_page = st.number_input( 
+                "Go to page",
+                min_value=1, 
+                max_value=total_pages,
+                value=current_page + 1
+            ) - 1
+            if target_page != current_page:
+                st.session_state.current_page = target_page
+                st.rerun()
+            
+        with col_next:
+            if st.button("Next ▶", disabled=(current_page >= total_pages - 1)):
+                st.session_state.current_page = min(total_pages - 1, current_page + 1)
+                st.rerun()
+
+        # Fetch page data
+        skip = current_page * 100
+        with st.spinner(f"Loading page {current_page + 1}..."):
+            start_fetch = datetime.now()
+            records = fetch_paginated_data(collection, st.session_state.query, skip, 100)
+            fetch_time = (datetime.now() - start_fetch).total_seconds()
+
+        if records:
+            st.success(f"✅ Loaded {len(records)} records in {fetch_time:.2f}s")
+            df = pd.DataFrame(records)
+            st.dataframe(df, width="stretch", height=600)
         else:
-            # Show progress
-            with st.spinner('Connecting to database...'):
-                client = get_mongo_client()
-                db = client['iotdb']
-                collection = db['navy']
-            
-            # Build optimized query
-            query = build_optimized_query(start_datetime, end_datetime, check_btn)
-            projection = get_projection_fields()
-            
-            # Estimate data size for auto mode
-            if performance_mode == "Auto":
-                with st.spinner('Estimating data size...'):
-                    estimated_count = collection.count_documents(query)
-                    use_pandas = estimated_count < 50000  # Use pandas for smaller datasets
-            else:
-                use_pandas = performance_mode == "Fast (Pandas)"
-            
-            # Process data
-            with st.spinner(f'Processing data using {"Streaming"} mode...'):
-                csv_data, count = stream_data_to_csv(collection, query, projection)
-            
-            if count > 0:
-                csv_bytes = csv_data.encode("utf-8")
-                filename = f"navy_data_{'Check' if check_btn else 'Fetch'}_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+            st.warning("⚠️ No records found on this page")
 
-                st.download_button(
-                    label=f"📥 Download CSV ({count:,} records)",
-                    data=csv_bytes,
-                    file_name=filename,
-                    mime="text/csv"
-                )
-                st.success(f"✅ {count:,} records processed successfully")
-                    
-            else:
-                st.warning("⚠️ No data found in the specified date range.")
+    except Exception as e:
+        st.error(f"❌ Database error: {str(e)}")
