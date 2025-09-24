@@ -45,6 +45,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+
 # --- Session state ---
 if "current_page" not in st.session_state:
     st.session_state.current_page = 0
@@ -122,7 +123,7 @@ if st.session_state.query_executed and st.session_state.query:
             st.stop()
 
         # Pagination
-        total_pages = (total_records - 1) // 100 + 1
+        total_pages = (total_records - 1) // 1000 + 1
         current_page = st.session_state.current_page
 
         st.info(f"📊 Found {total_records:,} records | Page {current_page + 1} of {total_pages}")
@@ -150,10 +151,10 @@ if st.session_state.query_executed and st.session_state.query:
                 st.rerun()
 
         # Fetch page data
-        skip = current_page * 100
+        skip = current_page * 1000
         with st.spinner(f"Loading page {current_page + 1}..."):
             start_fetch = datetime.now()
-            records = fetch_paginated_data(collection, st.session_state.query, skip, 100)
+            records = fetch_paginated_data(collection, st.session_state.query, skip, 1000)
             fetch_time = (datetime.now() - start_fetch).total_seconds()
 
         if records:
