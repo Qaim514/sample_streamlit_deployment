@@ -49,7 +49,7 @@ st.markdown("""
 if "current_page" not in st.session_state:
     st.session_state.current_page = 0
 if "records_per_page" not in st.session_state:
-    st.session_state.records_per_page = 100
+    st.session_state.records_per_page = 1000
 if "total_records" not in st.session_state:
     st.session_state.total_records = 0
 if "query" not in st.session_state:
